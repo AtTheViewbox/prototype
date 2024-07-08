@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Page</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div id="userId"></div> <!-- Placeholder for the user id -->
+    <div id="sessionKey"></div> <!-- Placeholder for the session key -->
+
+    <div id="layout"></div>
+    
+    <!-- Input fields for username and password -->
+    <input type="text" id="username" placeholder="Username">
+    <input type="password" id="password" placeholder="Password">
+    
+    <button onclick="signIn()">Sign In</button>
+    <button onclick="signInAnon()">Sign In Anonymously</button>
+    <button onclick="signOut()">Sign Out</button>
+    <div id="adminPanel"></div> <!-- Placeholder for the options for authorized users -->
+
+    <script>
+
+        const client = supabase.createClient('https://lumsceopxrnenvcwwghu.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx1bXNjZW9weHJuZW52Y3d3Z2h1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MjAzMDAyMzksImV4cCI6MjAzNTg3NjIzOX0.uVB7NlBQTJQ8O3fbb6l4Oz5zxnQruYqvO0dv_dLGy0c')
+
+        const randomColor = () => {
+            const r = Math.floor(Math.random() * 256)
+            const g = Math.floor(Math.random() * 256)
+            const b = Math.floor(Math.random() * 256)
+            return `rgb(${r}, ${g}, ${b})`
+        }
+        const user_color = randomColor()
+
+        const urlParams = new URLSearchParams(window.location.search)
+        // Check if the session key is present in the URL
+        const session_key = urlParams.get('session_key')
+        // Check if the layout is present in the URL
+        const layout = urlParams.get('layout')
+
+        if (session_key) {
+            joinSession(session_key)
+        } else {
+            if (layout) {
+                setupLayout(layout)
+            } else {
+                console.log("ERROR: No session key or layout provided")
+            }
+        }
+
+        setupAdminPanel(session_key, layout)
+
+        async function joinSession(session_key) {
+            const { data: { user } } = await client.auth.getUser()
+            if (!user) return
+
+            // get layout data from the sharingsessions table
+            const { data: sharingsessions, error } = await client
+                .from('sharingsessions')
+                .select()
+                .eq('session_key', session_key)
+            
+            // assert that there is only one sharingsession with the given session key
+            if (sharingsessions.length == 1) {
+                setupLayout(sharingsessions[0].layout, session_key)
+            } else {
+                console.log("ERROR: Invalid number of sharingsessions with the given session key", sharingsessions)
+            }
+
+            const layoutChannel = client.channel(session_key)
+                .on(
+                    'postgres_changes',
+                    { event: 'UPDATE', schema: 'public', table: 'sharingsessions', filter: `session_key=eq.${session_key}` },
+                    (payload) => {
+                        console.log('Change received!', payload)
+                        setupLayout(payload.new.layout, session_key)
+                    }
+                )
+                .subscribe()
+        }
+
+        // setup layout (this is the equivalent of setting up cornerstone)
+        async function setupLayout(layout_id, session_key="") {
+            console.log(layout_id, session_key)
+            let layout = document.getElementById('layout')
+            let broadcastChannelId = `broadcast-${layout_id}`
+            let presenceChannelId = `presence-${layout_id}`
+
+            let broadcastChannel = null
+            let presenceChannel = null
+
+            if (session_key) {
+                broadcastChannel = client.channel(broadcastChannelId)
+
+                const { data: { user } } = await client.auth.getUser()
+                if (!user) return
+            
+                // if in multiplayer mode or if in presentation mode with admin as the user
+                const { data: sharingsessions, error } = await client
+                        .from('sharingsessions')
+                        .select()
+                        .eq('session_key', session_key)
+                        .eq('id', user.id)
+                    
+                if (sharingsessions.length == 1) {
+                    broadcastChannel.on(
+                        'broadcast',
+                        { event: 'mousemove'},
+                        (message) => {
+                            console.log('Broadcast message received!', message)
+                            let dot = document.getElementById('dot')
+                            dot.style.left = `${message.payload.x}px`
+                            dot.style.top = `${message.payload.y}px`
+                            dot.style.backgroundColor = message.payload.user
+                        }
+                    ).subscribe()
+                }
+            }
+
+            // Remove existing layout if it already exists
+            if (layout) { layout.remove() }
+
+            // Create an empty div for the layout
+            layout = document.createElement('div')
+            layout.id = 'layout'
+            document.body.appendChild(layout)
+
+            layout.style.width = '250px'
+            layout.style.height = '250px'
+            layout.style.backgroundColor = 'black'
+            layout.style.position = 'absolute'
+            layout.style.top = '50%'
+            layout.style.left = '50%'
+            layout.style.transform = 'translate(-50%, -50%)'
+
+            // create dot element
+            const dot = document.createElement('div')
+            dot.id = 'dot'
+            dot.style.width = '10px'
+            dot.style.height = '10px'
+            dot.style.backgroundColor = user_color
+            dot.style.position = 'absolute'
+            layout.appendChild(dot)
+
+            // make the dot element draggable
+            let isDragging = false
+            
+            dot.addEventListener('mousedown', (event) => {
+                isDragging = true
+            })
+
+            
+            function handleMouseMove(event) {
+                if (isDragging) {
+                    const layout = document.getElementById('layout')
+                    const layoutOffset = layout.getBoundingClientRect()
+
+                    dot.style.left = `${event.clientX - layoutOffset.left}px`
+                    dot.style.top = `${event.clientY - layoutOffset.top}px`
+
+                    if (broadcastChannel) {
+                        console.log('sending message', layout_id, event.clientX - layoutOffset.left, event.clientY - layoutOffset.top)
+                        broadcastChannel.send({
+                            type: 'broadcast',
+                            event: 'mousemove',
+                            payload: {
+                                x: event.clientX - layoutOffset.left,
+                                y: event.clientY - layoutOffset.top,
+                                user: user_color,
+                                layout: layout_id
+                            }
+                        })
+                    }
+                }
+            }
+
+            layout.addEventListener('mousemove', handleMouseMove)
+
+            dot.addEventListener('mouseup', () => {
+                isDragging = false
+            })
+
+            // in the center of the layout, put the text "layout_id"
+            const layoutId = document.createElement('div')
+            layoutId.textContent = layout_id
+            layoutId.style.position = 'absolute'
+            layoutId.style.color = 'white';
+            layoutId.style.top = '50%'
+            layoutId.style.left = '50%'
+            layoutId.style.transform = 'translate(-50%, -50%)'
+            layout.appendChild(layoutId)
+        }
+
+        async function setupAdminPanel(session_key, layout_id) {
+            // If there is no user, simply return
+            const { data: { user } } = await client.auth.getUser()
+            if (!user) return
+
+            // There is a user, so update the placeholder with the user id
+            document.getElementById('userId').textContent = user.id
+
+            // If the user is not anonymous, show the admin panel
+            if (!user.is_anonymous) {
+
+                // If no session key is present, then the user can choose to create their own session for this layout
+                if (!session_key && layout_id) {
+                    // query the sharingsessions table for their sharing key
+                    const { data: sharingsessions, error } = await client
+                        .from('sharingsessions')
+                        .select()
+                        .eq('id', user.id)
+                    
+                    // sharingsession length should only ever be one
+                    if (sharingsessions.length == 1) {
+
+                        if (sharingsessions[0].layout) {
+                            console.log("User already has a session associated with their user id. This will overwrite their existing sharing session", sharingsessions)
+                        }
+
+                        const adminPanel = document.getElementById('adminPanel');
+
+                        // Create submit button
+                        const createButton = document.createElement('button');
+                        createButton.textContent = 'Create';
+                        createButton.onclick = createSession;
+                        adminPanel.appendChild(createButton);
+
+                        async function createSession() {
+                            
+                            const { data, error } = await client
+                                .from('sharingsessions')
+                                .update({ layout: layout_id })
+                                .eq('session_key', sharingsessions[0].session_key)
+                                .select()
+                            
+                            setupLayout(layout_id, sharingsessions[0].session_key)
+                            
+                        }
+
+                        console.log("share this link", sharingsessions[0].session_key, layout)
+                    } else {
+                        console.log("ERROR: User has an invalid number of sessions associated with their user id.", sharingsessions)
+                    }
+                }
+
+
+                // If there is a session key and it is associated with the user, then give the session admin panel
+                if (session_key) {
+                    const { data: sharingsessions, error } = await client
+                        .from('sharingsessions')
+                        .select()
+                        .eq('session_key', session_key)
+                        .eq('id', user.id)
+                    
+                    if (sharingsessions.length == 1) {
+                        const adminPanel = document.getElementById('adminPanel');
+
+                        // Create title element
+                        const titleElement = document.createElement('h2');
+                        titleElement.textContent = 'Admin Panel';
+                        adminPanel.appendChild(titleElement);
+
+                        // Create input element
+                        const inputElement = document.createElement('input');
+                        inputElement.type = 'text';
+                        inputElement.id = 'layout_input';
+                        adminPanel.appendChild(inputElement);
+
+                        // Create submit button
+                        const submitButton = document.createElement('button');
+                        submitButton.textContent = 'Submit';
+                        submitButton.onclick = submitData;
+                        adminPanel.appendChild(submitButton);
+
+                        async function submitData() {
+                            
+                            const { data, error } = await client
+                                .from('sharingsessions')
+                                .update({ layout: document.getElementById('layout_input').value })
+                                .eq('session_key', session_key)
+                                .select()
+                                    
+                        }
+                    }
+                }
+            }
+        }
+        
+        async function signIn() {
+            const username = document.getElementById('username').value
+            const password = document.getElementById('password').value
+            const { user, error } = await client.auth.signInWithPassword({ email: username, password: password })
+            if (error) console.error('Error signing in:', error)
+            else console.log('User signed in:', user)
+        }
+
+        async function signInAnon() {
+            const { data, error } = await client.auth.signInAnonymously()
+            if (error) console.error('Error signing in:', error)
+            else console.log('User signed in:', data)
+        }
+
+        async function signOut() {
+            const { error } = await client.auth.signOut()
+            if (error) console.error('Error signing out:', error)
+            else console.log('User signed out.')
+        }
+      </script>
+    </body>
+    </html>
